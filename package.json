@@ -1,0 +1,39 @@
+{
+  "name": "@junsayke/cebuano-thesaurus",
+  "type": "module",
+  "version": "1.0.0",
+  "description": "A thesaurus for the Cebuano language, providing synonyms and related words.",
+  "author": "Antonio Ubaldo <antonio.junjr@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/junsayke/cebuano-thesaurus#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/junsayke/cebuano-thesaurus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/junsayke/cebuano-thesaurus/issues"
+  },
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "test": "vitest",
+    "typecheck": "tsc --noEmit",
+    "release": "bumpp",
+    "prepublishOnly": "pnpm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "@typescript/native-preview": "7.0.0-dev.20260316.1",
+    "bumpp": "^11.0.1",
+    "tsdown": "^0.21.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}
