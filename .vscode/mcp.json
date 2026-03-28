@@ -1,0 +1,13 @@
+{
+    "servers": {
+        "MCP SQLite Server": {
+            "type": "stdio",
+            "command": "npx",
+            "args": [
+                "-y",
+                "mcp-sqlite",
+                "data/wolff.sqlite" // Adjust the path to your SQLite database file
+            ]
+        }
+    }
+}

@@ -26,12 +26,15 @@
     "test": "vitest",
     "typecheck": "tsc --noEmit",
     "release": "bumpp",
-    "prepublishOnly": "pnpm run build"
+    "prepublishOnly": "pnpm run build",
+    "db:migrate": "node --experimental-strip-types scripts/migrate.ts",
+    "db:generate": "kysely-codegen --dialect sqlite --url data/database/wolff.sqlite --out-file src/types/database.ts"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
     "@typescript/native-preview": "7.0.0-dev.20260316.1",
     "bumpp": "^11.0.1",
+    "kysely-codegen": "^0.20.0",
     "ts-node": "^10.9.2",
     "tsdown": "^0.21.3",
     "typescript": "^5.9.3",
@@ -40,6 +43,7 @@
   "dependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "better-sqlite3": "^12.8.0",
-    "fast-xml-parser": "^5.5.9"
+    "fast-xml-parser": "^5.5.9",
+    "kysely": "^0.28.14"
   }
 }

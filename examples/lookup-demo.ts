@@ -1,0 +1,20 @@
+import { lookup } from '../src/index';
+
+async function main() {
+  console.log("Initializing Cebuano Thesaurus...\n");
+
+  const wordToTest = "buang";
+  console.log(`Looking up: "${wordToTest}"`);
+
+  const result = await lookup(wordToTest);
+
+  if (result) {
+    console.log("✅ Word found!");
+    
+    console.dir(result, { depth: null, colors: true });
+  } else {
+    console.log("❌ Word not found.");
+  }
+}
+
+main().catch(console.error);

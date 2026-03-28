@@ -3,7 +3,7 @@ import { readFileSync, existsSync, unlinkSync } from 'fs';
 
 const dir = import.meta.dirname;
 console.log(dir)
-const dbPath = `${dir}/../data/wolff.sqlite`;
+const dbPath = `${dir}/../data/database/wolff.sqlite`;
 
 if (existsSync(dbPath)) unlinkSync(dbPath); // remove existing db if it exists, to start fresh
 const sql = new db(dbPath);

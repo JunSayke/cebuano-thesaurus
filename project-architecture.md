@@ -1,836 +1,351 @@
-# Cebuano Thesaurus — Project Architecture
+# Project Architecture — `@junsayke/cebuano-thesaurus`
 
-## 1. Design Philosophy
-
-`cebuano-thesaurus` is a deterministic, offline-first TypeScript utility library. The architecture is guided by three principles:
-
-1. **Ports & Adapters at every boundary** — feature logic never imports a concrete data source or a concrete algorithm implementation. It only talks to interfaces (ports). Concrete loaders and strategies are injected at the composition root.
-2. **Feature slicing inside the core** — each capability (rhyme, synonyms, etc.) is a self-contained vertical slice with its own types, algorithm, and public function. Adding a new feature means adding a new folder, not modifying existing ones.
-3. **Pure algorithmic core** — string processing, phonetic rules, and graph traversal are written as pure functions with no I/O. This makes them trivially unit-testable and portable to any runtime.
-
-There are two distinct kinds of ports:
-
-| Port family | Location | Answers the question |
-|---|---|---|
-| **Data ports** | `src/ports/data/` | *Where* does the data come from? (JSON, SQLite, API) |
-| **Strategy ports** | `src/ports/strategies/` | *How* is the algorithm computed? (rules, ML, hybrid) |
+> **Source of truth** for project structure, layer responsibilities, naming conventions, and contribution rules. All code changes must conform to this document.
 
 ---
 
-## 2. Dependency Rule
+## Overview
 
-Dependencies only flow inward. Nothing in an inner layer may import from an outer layer. `src/index.ts` is the single place where all outer layers are imported and wired together.
+`cebuano-thesaurus` is a TypeScript library that exposes Cebuano language features — synonym lookup, rhyme detection, anagram generation, and morphological analysis — built on the **Phildict Wolff** (WCED) SQLite dictionary.
+
+The project follows **Hexagonal Architecture** (Ports & Adapters). The goal is to keep the domain completely free of infrastructure concerns, making every layer independently testable and replaceable.
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  src/index.ts  (composition root + public API)               │
-│  — only file allowed to import adapters and strategies       │
-├──────────────────────────────────────────────────────────────┤
-│  src/features/*  (orchestration: calls ports, returns types) │
-├──────────────────────────────────────────────────────────────┤
-│  src/core/*  (pure algorithms, zero I/O, zero port calls)    │
-├─────────────────────────────┬────────────────────────────────┤
-│  src/ports/data/*           │  src/ports/strategies/*        │
-│  (data source contracts)    │  (algorithm contracts)         │
-└─────────────────────────────┴────────────────────────────────┘
-         ↑ injected here, never imported by features
-  src/data/adapters/*          src/strategies/*/*
-  (JSON, SQLite, …)            (rule-based, ML, …)
+┌────────────────────────────────────────────────────────────────┐
+│                        Consumer / Tests                        │
+└───────────────────────────────┬────────────────────────────────┘
+                                │ calls
+┌───────────────────────────────▼────────────────────────────────┐
+│                     Primary Adapters                           │
+│              src/index.ts  (public API surface)                │
+└───────────────────────────────┬────────────────────────────────┘
+                                │ calls
+┌───────────────────────────────▼────────────────────────────────┐
+│                       Features (Use Cases)                     │
+│   src/features/{anagrams,lookup,rhyme,synonyms}/               │
+└──────────┬────────────────────────────────────────┬────────────┘
+           │ uses (domain logic)                    │ calls via
+┌──────────▼──────────┐               ┌─────────────▼────────────┐
+│      Core           │               │     Output Ports          │
+│  src/core/          │               │   src/ports/              │
+│  - stemmer.ts       │               │  IWordRepository, etc.    │
+│  - syllabifier.ts   │               └─────────────┬────────────┘
+└─────────────────────┘                             │ implemented by
+                                      ┌─────────────▼────────────┐
+                                      │   Secondary Adapters      │
+                                      │   src/adapters/           │
+                                      │   (SQLite / Kysely)       │
+                                      └─────────────┬────────────┘
+                                                    │ reads
+                                      ┌─────────────▼────────────┐
+                                      │   Data                   │
+                                      │   data/database/         │
+                                      │   wolff.sqlite           │
+                                      └──────────────────────────┘
 ```
 
 ---
 
-## 3. Project Structure
+## Directory Structure
 
 ```
 cebuano-thesaurus/
-│
-├── data/                               # Lexical resource files (not shipped in dist)
-│   ├── cebuano.db                      # SQLite database (primary offline source)
-│   │                                   #   tables: words, word_translations, synonyms
-│   │                                   #   columns: word, lemma, pos, definitions,
-│   │                                   #            syllables, rhyming_part,
-│   │                                   #            anagram_key, pronunciation,
-│   │                                   #            phonetic_embedding (JSONB)
-│   ├── lexicon.json                    # JSON fallback / dev fixture
-│   ├── synonyms-graph.json             # Adjacency map { word → string[] }
-│   ├── word-frequency.json             # Optional frequency ranks
-│   └── README.md                       # Data schema and sourcing notes
-│
+├── data/
+│   └── database/
+│       ├── wolff.sqlite            # Phildict Wolff dictionary (not committed)
+│       └── migrations/             # Kysely migration files
+├── openspec/                       # OpenSpec change management
+│   ├── changes/
+│   ├── specs/
+│   └── config.yaml
+├── phildict/                       # Raw Phildict source data (submodule / local)
+├── scripts/
+│   ├── import-phildict-wolff-sql.ts
+│   └── migrate.ts
 ├── src/
-│   │
-│   ├── index.ts                        # Composition root: instantiates all adapters
-│   │                                   # and strategies, partially applies them to
-│   │                                   # feature functions, and re-exports public API.
-│   │
-│   ├── types/                          # Shared domain types. No logic.
-│   │   │                               # Imported by every other layer.
-│   │   ├── lexicon.ts                  # WordEntry, PosToken, PosTag, MatchOptions
-│   │   └── index.ts                    # Barrel re-export
-│   │
-│   ├── ports/
-│   │   │
-│   │   ├── data/                       # What data is needed and where it comes from.
-│   │   │   │                           # Features import ONLY from here, never from adapters.
-│   │   │   ├── IDictionaryPort.ts      # getByWord, listByRhymeKey,
-│   │   │   │                           # listBySortedLetters, has
-│   │   │   ├── ISynonymPort.ts         # getSynonyms(word): string[]
-│   │   │   └── index.ts
-│   │   │
-│   │   └── strategies/                 # How an algorithm is computed.
-│   │       │                           # Features import ONLY from here, never from
-│   │       │                           # concrete strategy implementations.
-│   │       ├── ISyllabifyStrategy.ts   # syllabify(word): string[]
-│   │       ├── IRhymeStrategy.ts       # findRhymes(word, dict): string[]
-│   │       ├── IPosStrategy.ts         # tag(text, dict): PosToken[]
-│   │       └── index.ts
-│   │
-│   ├── data/
-│   │   └── adapters/                   # Concrete implementations of data ports.
-│   │       │                           # Only index.ts imports these.
-│   │       ├── JsonDictionaryAdapter.ts    # Loads lexicon.json into memory maps
-│   │       ├── JsonSynonymAdapter.ts       # Loads synonyms-graph.json
-│   │       ├── SqliteDictionaryAdapter.ts  # Queries cebuano.db via better-sqlite3
-│   │       └── SqliteSynonymAdapter.ts     # JOIN query across word_translations
-│   │
-│   ├── strategies/                     # Concrete implementations of strategy ports.
-│   │   │                               # Only index.ts imports these.
-│   │   ├── syllabify/
-│   │   │   ├── RuleBasedSyllabifier.ts # Applies Cebuano CV/CVC/CCV/V phoneme rules
-│   │   │   └── MlSyllabifier.ts        # Runs an ONNX sequence model
-│   │   ├── rhyme/
-│   │   │   ├── RuleBasedRhymeFinder.ts # Extracts rhyme key via phonetics.ts,
-│   │   │   │                           # then queries dict port
-│   │   │   └── MlRhymeFinder.ts        # Uses phonetic embeddings (JSONB column)
-│   │   └── pos-tag/
-│   │       ├── RuleBasedPosTagger.ts   # Affix rules + dictionary fallback
-│   │       └── MlPosTagger.ts          # Token classification model (ONNX)
-│   │
-│   ├── core/                           # Pure functions. No I/O. No port calls.
-│   │   │                               # Imported by features and strategy impls.
-│   │   ├── normalizer.ts               # stripDiacritics, lowercase, trim
-│   │   ├── tokenizer.ts                # splitOnWhitespaceAndPunctuation
-│   │   ├── phonetics.ts                # syllabifyWord, rhymeKey, vowelMap
-│   │   └── anagram.ts                  # sortLetters, buildAnagramKey
-│   │
-│   ├── features/                       # One folder per public capability.
-│   │   │                               # Each slice owns its logic and export.
-│   │   │                               # Allowed imports: types/, ports/*, core/ only.
-│   │   │
-│   │   ├── lookup/
-│   │   │   ├── lookup.ts               # lookup(word, dict: IDictionaryPort)
-│   │   │   └── index.ts
-│   │   │
-│   │   ├── rhyme/
-│   │   │   ├── rhyme.ts                # rhyme(word, dict, strategy: IRhymeStrategy)
-│   │   │   └── index.ts
-│   │   │
-│   │   ├── synonyms/
-│   │   │   ├── synonyms.ts             # synonyms(word, syn: ISynonymPort)
-│   │   │   └── index.ts
-│   │   │
+│   ├── adapters/                   # Secondary adapters (infrastructure)
+│   ├── core/                       # Pure domain logic
+│   │   ├── stemmer.ts
+│   │   └── syllabifier.ts
+│   ├── features/                   # Use-case layer (one folder per feature)
 │   │   ├── anagrams/
-│   │   │   ├── anagrams.ts             # anagrams(word, dict: IDictionaryPort)
-│   │   │   └── index.ts
-│   │   │
-│   │   ├── syllabify/
-│   │   │   ├── syllabify.ts            # syllabify(word, strategy: ISyllabifyStrategy)
-│   │   │   └── index.ts
-│   │   │
-│   │   └── pos-tag/
-│   │       ├── pos-tag.ts              # posTag(text, dict, strategy: IPosStrategy)
-│   │       └── index.ts
-│   │
-│   └── utils/
-│       └── set.ts                      # union, intersection helpers (pure)
-│
+│   │   ├── lookup/
+│   │   ├── rhyme/
+│   │   └── synonyms/
+│   ├── ports/                      # Port interfaces (contracts)
+│   ├── types/
+│   │   └── database.ts             # Auto-generated Kysely types — do not edit
+│   ├── utils/                      # Pure, stateless shared helpers
+│   │   └── parseEntryXml.ts
+│   └── index.ts                    # Public API surface (primary adapter / barrel)
 ├── tests/
-│   ├── core/
-│   │   ├── normalizer.test.ts
-│   │   ├── phonetics.test.ts
-│   │   └── anagram.test.ts
-│   ├── features/
-│   │   ├── lookup.test.ts              # Stub IDictionaryPort
-│   │   ├── rhyme.test.ts               # Stub IDictionaryPort + IRhymeStrategy
-│   │   ├── synonyms.test.ts            # Stub ISynonymPort
-│   │   ├── anagrams.test.ts            # Stub IDictionaryPort
-│   │   ├── syllabify.test.ts           # Stub ISyllabifyStrategy
-│   │   └── pos-tag.test.ts             # Stub IDictionaryPort + IPosStrategy
-│   ├── adapters/
-│   │   ├── JsonDictionaryAdapter.test.ts
-│   │   └── SqliteDictionaryAdapter.test.ts
-│   ├── strategies/
-│   │   ├── RuleBasedSyllabifier.test.ts
-│   │   └── RuleBasedPosTagger.test.ts
-│   └── fixtures/
-│       ├── mock-dictionary.ts          # In-memory IDictionaryPort stub
-│       └── mock-synonym.ts             # In-memory ISynonymPort stub
-│
-├── dist/                               # Built output (tsdown, gitignored)
-├── package.json
+│   └── index.test.ts
 ├── tsconfig.json
-├── tsdown.config.ts
-└── README.md
+└── tsdown.config.ts
 ```
 
 ---
 
-## 4. Layer Responsibilities
+## Layer Definitions
 
-### 4.1 `types/` — Domain contracts
+### 1. Core (`src/core/`)
 
-Pure TypeScript interfaces and type aliases. No logic. Imported by every other layer.
+The innermost layer. Contains **pure Cebuano NLP algorithms** with zero dependencies on infrastructure, ports, or features. Classes and functions here must be side-effect-free and depend only on the TypeScript standard library.
 
-```ts
-// src/types/lexicon.ts
-export interface WordEntry {
-  word: string
-  lemma: string
-  pos: PosTag
-  definitions: string[]
-  syllables: string[]
-  rhymingPart: string
-  pronunciation: string
-  variants?: string[]
-}
+**Responsibilities**
+- Cebuano morphology: stemming, prefix/suffix/infix stripping, reduplication detection.
+- Syllabification: CV-sequence analysis, syllable boundary rules, onset/nucleus/coda splitting.
+- Any future pure linguistic algorithms (phonology, romanization, etc.).
 
-export type PosTag = 'noun' | 'verb' | 'adj' | 'adv' | 'particle' | 'unknown'
+**Rules**
+- No `import` from `adapters/`, `features/`, `ports/`, or any external I/O package.
+- Classes are exported as named exports, not default exports.
+- Every public method must have a JSDoc comment.
+- All logic must be covered by unit tests.
 
-export interface PosToken {
-  token: string
-  tag: PosTag
-  lemma: string
-  start: number
-  end: number
-}
+**Current modules**
 
-export interface MatchOptions {
-  limit?: number
-  fuzzy?: boolean
-}
-```
-
----
-
-### 4.2 `ports/data/` — Data source contracts
-
-Thin interfaces describing *what* data capabilities are needed, never *how* they are satisfied.
-
-```ts
-// src/ports/data/IDictionaryPort.ts
-import type { WordEntry } from '../../types/index.js'
-
-export interface IDictionaryPort {
-  getByWord(word: string): WordEntry | null
-  listByRhymeKey(rhymeKey: string): string[]
-  listBySortedLetters(sortedKey: string): string[]
-  has(word: string): boolean
-}
-```
-
-```ts
-// src/ports/data/ISynonymPort.ts
-export interface ISynonymPort {
-  getSynonyms(word: string): string[]
-}
-```
-
----
-
-### 4.3 `ports/strategies/` — Algorithm contracts
-
-Thin interfaces describing *how* a computation should be performed, without fixing a specific implementation. Features that have swappable algorithms accept one of these ports instead of calling `core/` directly.
-
-```ts
-// src/ports/strategies/ISyllabifyStrategy.ts
-export interface ISyllabifyStrategy {
-  syllabify(word: string): string[]
-}
-```
-
-```ts
-// src/ports/strategies/IRhymeStrategy.ts
-import type { IDictionaryPort } from '../data/IDictionaryPort.js'
-
-// Some strategies need data access (ML embedding lookup);
-// others are fully stateless (rule-based). The dict port is
-// passed in so strategies can stay decoupled from adapters.
-export interface IRhymeStrategy {
-  findRhymes(word: string, dict: IDictionaryPort): string[]
-}
-```
-
-```ts
-// src/ports/strategies/IPosStrategy.ts
-import type { PosToken } from '../../types/index.js'
-import type { IDictionaryPort } from '../data/IDictionaryPort.js'
-
-export interface IPosStrategy {
-  tag(text: string, dict: IDictionaryPort): PosToken[]
-}
-```
-
----
-
-### 4.4 `data/adapters/` — Concrete data loaders
-
-Implement data ports. Instantiated once at startup. Only `src/index.ts` imports these.
-
-#### JSON adapter (dev / offline fallback)
-
-```ts
-// src/data/adapters/JsonDictionaryAdapter.ts
-import type { IDictionaryPort } from '../../ports/data/IDictionaryPort.js'
-import type { WordEntry } from '../../types/index.js'
-import rawData from '../../../data/lexicon.json' assert { type: 'json' }
-
-export class JsonDictionaryAdapter implements IDictionaryPort {
-  private readonly wordMap = new Map<string, WordEntry>()
-  private readonly rhymeBuckets = new Map<string, string[]>()
-  private readonly anagramBuckets = new Map<string, string[]>()
-
-  constructor() {
-    for (const entry of rawData as WordEntry[]) {
-      this.wordMap.set(entry.word, entry)
-
-      const rk = entry.rhymingPart
-      if (!this.rhymeBuckets.has(rk)) this.rhymeBuckets.set(rk, [])
-      this.rhymeBuckets.get(rk)!.push(entry.word)
-
-      const ak = [...entry.word].sort().join('')
-      if (!this.anagramBuckets.has(ak)) this.anagramBuckets.set(ak, [])
-      this.anagramBuckets.get(ak)!.push(entry.word)
-    }
-  }
-
-  getByWord(word: string) { return this.wordMap.get(word) ?? null }
-  listByRhymeKey(key: string) { return this.rhymeBuckets.get(key) ?? [] }
-  listBySortedLetters(key: string) { return this.anagramBuckets.get(key) ?? [] }
-  has(word: string) { return this.wordMap.has(word) }
-}
-```
-
-#### SQLite adapter (production offline-first)
-
-Switching to SQLite requires only a new adapter class. No feature file is touched.
-
-```ts
-// src/data/adapters/SqliteDictionaryAdapter.ts
-import Database from 'better-sqlite3'
-import type { IDictionaryPort } from '../../ports/data/IDictionaryPort.js'
-import type { WordEntry } from '../../types/index.js'
-
-export class SqliteDictionaryAdapter implements IDictionaryPort {
-  private readonly db: Database.Database
-
-  constructor(dbPath: string) {
-    this.db = new Database(dbPath)
-  }
-
-  getByWord(word: string): WordEntry | null {
-    return this.db
-      .prepare('SELECT * FROM words WHERE word = ?')
-      .get(word) as WordEntry ?? null
-  }
-
-  listByRhymeKey(key: string): string[] {
-    return this.db
-      .prepare('SELECT word FROM words WHERE rhyming_part = ?')
-      .all(key)
-      .map((r: any) => r.word)
-  }
-
-  listBySortedLetters(key: string): string[] {
-    return this.db
-      .prepare('SELECT word FROM words WHERE anagram_key = ?')
-      .all(key)
-      .map((r: any) => r.word)
-  }
-
-  has(word: string): boolean {
-    return !!this.db
-      .prepare('SELECT 1 FROM words WHERE word = ? LIMIT 1')
-      .get(word)
-  }
-}
-```
-
-#### SQLite synonym adapter (relational join)
-
-Returns all Cebuano words that share at least one English translation with the query word — no graph structure needed.
-
-```ts
-// src/data/adapters/SqliteSynonymAdapter.ts
-import Database from 'better-sqlite3'
-import type { ISynonymPort } from '../../ports/data/ISynonymPort.js'
-
-export class SqliteSynonymAdapter implements ISynonymPort {
-  private readonly db: Database.Database
-
-  constructor(dbPath: string) {
-    this.db = new Database(dbPath)
-  }
-
-  getSynonyms(word: string): string[] {
-    return this.db.prepare(`
-      SELECT DISTINCT w2.word
-      FROM word_translations wt1
-      JOIN word_translations wt2 ON wt1.translation_id = wt2.translation_id
-      JOIN words w2             ON wt2.word_id = w2.id
-      WHERE wt1.word = ? AND w2.word != ?
-    `).all(word, word).map((r: any) => r.word)
-  }
-}
-```
-
----
-
-### 4.5 `strategies/` — Concrete algorithm implementations
-
-Implement strategy ports. Only `src/index.ts` imports these. Each strategy may use `core/` pure functions but never imports adapters directly.
-
-#### Rule-based syllabifier
-
-```ts
-// src/strategies/syllabify/RuleBasedSyllabifier.ts
-import type { ISyllabifyStrategy } from '../../ports/strategies/ISyllabifyStrategy.js'
-import { syllabifyWord } from '../../core/phonetics.js'
-
-export class RuleBasedSyllabifier implements ISyllabifyStrategy {
-  syllabify(word: string): string[] {
-    return syllabifyWord(word)   // delegates to pure core function
-  }
-}
-```
-
-#### ML syllabifier (ONNX)
-
-```ts
-// src/strategies/syllabify/MlSyllabifier.ts
-import type { ISyllabifyStrategy } from '../../ports/strategies/ISyllabifyStrategy.js'
-
-export class MlSyllabifier implements ISyllabifyStrategy {
-  private readonly model: OnnxSession
-
-  constructor(modelPath: string) {
-    this.model = loadOnnxModel(modelPath)
-  }
-
-  syllabify(word: string): string[] {
-    return this.model.run(word)
-  }
-}
-```
-
-#### Rule-based rhyme finder
-
-```ts
-// src/strategies/rhyme/RuleBasedRhymeFinder.ts
-import type { IRhymeStrategy } from '../../ports/strategies/IRhymeStrategy.js'
-import type { IDictionaryPort } from '../../ports/data/IDictionaryPort.js'
-import { rhymeKey } from '../../core/phonetics.js'
-import { normalize } from '../../core/normalizer.js'
-
-export class RuleBasedRhymeFinder implements IRhymeStrategy {
-  findRhymes(word: string, dict: IDictionaryPort): string[] {
-    const normalized = normalize(word)
-    const key = rhymeKey(normalized)
-    return dict.listByRhymeKey(key).filter(w => w !== normalized)
-  }
-}
-```
-
-#### ML rhyme finder (phonetic embeddings stored in DB)
-
-Requires a `phonetic_embedding` JSONB column in the SQLite `words` table. The adapter would expose an extended method, or a dedicated `IPhoneticPort` can be created when this path is pursued.
-
-```ts
-// src/strategies/rhyme/MlRhymeFinder.ts
-import type { IRhymeStrategy } from '../../ports/strategies/IRhymeStrategy.js'
-import type { IDictionaryPort } from '../../ports/data/IDictionaryPort.js'
-
-export class MlRhymeFinder implements IRhymeStrategy {
-  private readonly model: EmbeddingModel
-
-  constructor(modelPath: string) {
-    this.model = loadEmbeddingModel(modelPath)
-  }
-
-  findRhymes(word: string, dict: IDictionaryPort): string[] {
-    const embedding = this.model.embed(word)
-    // Queries the phonetic_embedding JSONB column via an extended port method
-    return (dict as any).listByPhoneticSimilarity(embedding)
-  }
-}
-```
-
-#### Rule-based POS tagger
-
-```ts
-// src/strategies/pos-tag/RuleBasedPosTagger.ts
-import type { IPosStrategy } from '../../ports/strategies/IPosStrategy.js'
-import type { IDictionaryPort } from '../../ports/data/IDictionaryPort.js'
-import type { PosToken, PosTag } from '../../types/index.js'
-import { tokenize } from '../../core/tokenizer.js'
-import { normalize } from '../../core/normalizer.js'
-
-export class RuleBasedPosTagger implements IPosStrategy {
-  tag(text: string, dict: IDictionaryPort): PosToken[] {
-    return tokenize(text).map(({ token, start, end }) => {
-      const entry = dict.getByWord(normalize(token))
-      const tag = entry?.pos ?? this.applyAffixRules(token)
-      return { token, tag, lemma: entry?.lemma ?? token, start, end }
-    })
-  }
-
-  private applyAffixRules(token: string): PosTag {
-    if (token.startsWith('nag') || token.startsWith('mo')) return 'verb'
-    if (token.endsWith('on')    || token.endsWith('an'))   return 'verb'
-    if (token.startsWith('ka')  && token.endsWith('an'))   return 'noun'
-    return 'unknown'
-  }
-}
-```
-
-#### ML POS tagger (ONNX token classifier)
-
-```ts
-// src/strategies/pos-tag/MlPosTagger.ts
-import type { IPosStrategy } from '../../ports/strategies/IPosStrategy.js'
-import type { IDictionaryPort } from '../../ports/data/IDictionaryPort.js'
-import type { PosToken } from '../../types/index.js'
-import { tokenize } from '../../core/tokenizer.js'
-
-export class MlPosTagger implements IPosStrategy {
-  private readonly model: OnnxSession
-
-  constructor(modelPath: string) {
-    this.model = loadOnnxModel(modelPath)
-  }
-
-  tag(text: string, _dict: IDictionaryPort): PosToken[] {
-    const tokens = tokenize(text)
-    const tags = this.model.classify(tokens.map(t => t.token))
-    return tokens.map((t, i) => ({ ...t, tag: tags[i], lemma: t.token }))
-  }
-}
-```
-
----
-
-### 4.6 `core/` — Pure algorithms
-
-No dependencies on ports or adapters. Used freely by features and strategy implementations.
-
-```ts
-// src/core/phonetics.ts
-export function syllabifyWord(word: string): string[] {
-  // Applies Cebuano CV / CVC / CCV / V syllable rules
-  const syllables: string[] = []
-  // ... rule implementation
-  return syllables
-}
-
-export function rhymeKey(word: string): string {
-  const syllables = syllabifyWord(word)
-  return syllables.at(-1) ?? word
-}
-```
-
-```ts
-// src/core/normalizer.ts
-export function normalize(input: string): string {
-  return input.trim().toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '')
-}
-```
-
----
-
-### 4.7 `features/` — Orchestration slices
-
-Each feature function accepts its required port(s) as parameters. It has no knowledge of which adapter or strategy satisfies those ports.
-
-```ts
-// src/features/rhyme/rhyme.ts
-import type { IDictionaryPort } from '../../ports/data/IDictionaryPort.js'
-import type { IRhymeStrategy }  from '../../ports/strategies/IRhymeStrategy.js'
-
-export function rhyme(
-  word: string,
-  dict: IDictionaryPort,
-  strategy: IRhymeStrategy
-): string[] {
-  return strategy.findRhymes(word, dict)
-}
-```
-
-```ts
-// src/features/syllabify/syllabify.ts
-import type { ISyllabifyStrategy } from '../../ports/strategies/ISyllabifyStrategy.js'
-import { normalize } from '../../core/normalizer.js'
-
-export function syllabify(word: string, strategy: ISyllabifyStrategy): string[] {
-  return strategy.syllabify(normalize(word))
-}
-```
-
-```ts
-// src/features/pos-tag/pos-tag.ts
-import type { IDictionaryPort } from '../../ports/data/IDictionaryPort.js'
-import type { IPosStrategy }    from '../../ports/strategies/IPosStrategy.js'
-import type { PosToken }        from '../../types/index.js'
-
-export function posTag(
-  text: string,
-  dict: IDictionaryPort,
-  strategy: IPosStrategy
-): PosToken[] {
-  return strategy.tag(text, dict)
-}
-```
-
-```ts
-// src/features/anagrams/anagrams.ts
-// No strategy port needed — sorting letters is a stable one-liner.
-// Only the data source is variable.
-import type { IDictionaryPort } from '../../ports/data/IDictionaryPort.js'
-import { normalize } from '../../core/normalizer.js'
-
-export function anagrams(word: string, dict: IDictionaryPort): string[] {
-  const normalized = normalize(word)
-  const key = [...normalized].sort().join('')
-  return dict.listBySortedLetters(key).filter(w => w !== normalized)
-}
-```
-
----
-
-### 4.8 `src/index.ts` — Composition root & public API
-
-The **only** file that imports from `data/adapters/` and `strategies/`. It instantiates all concrete objects, injects them into feature functions via partial application, and exports a clean zero-dependency API surface.
-
-```ts
-// src/index.ts
-
-// ── Data adapters ──────────────────────────────────────────────────────────
-// Swap SqliteDictionaryAdapter ↔ JsonDictionaryAdapter with no other changes.
-import { SqliteDictionaryAdapter } from './data/adapters/SqliteDictionaryAdapter.js'
-import { SqliteSynonymAdapter }    from './data/adapters/SqliteSynonymAdapter.js'
-
-// ── Strategy implementations ───────────────────────────────────────────────
-// Swap RuleBased* ↔ Ml* with no other changes.
-import { RuleBasedSyllabifier }  from './strategies/syllabify/RuleBasedSyllabifier.js'
-import { RuleBasedRhymeFinder }  from './strategies/rhyme/RuleBasedRhymeFinder.js'
-import { RuleBasedPosTagger }    from './strategies/pos-tag/RuleBasedPosTagger.js'
-
-// ── Feature functions ──────────────────────────────────────────────────────
-import { lookup    as _lookup    } from './features/lookup/index.js'
-import { rhyme     as _rhyme     } from './features/rhyme/index.js'
-import { synonyms  as _synonyms  } from './features/synonyms/index.js'
-import { anagrams  as _anagrams  } from './features/anagrams/index.js'
-import { syllabify as _syllabify } from './features/syllabify/index.js'
-import { posTag    as _posTag    } from './features/pos-tag/index.js'
-
-// ── Wire everything (instantiated once) ───────────────────────────────────
-const dict = new SqliteDictionaryAdapter('./data/cebuano.db')
-const syn  = new SqliteSynonymAdapter('./data/cebuano.db')
-
-const syllabifier = new RuleBasedSyllabifier()
-const rhymeFinder = new RuleBasedRhymeFinder()
-const posTagger   = new RuleBasedPosTagger()
-
-// ── Public API (dependency-free from caller's perspective) ─────────────────
-export const lookup    = (word: string) => _lookup(word, dict)
-export const rhyme     = (word: string) => _rhyme(word, dict, rhymeFinder)
-export const synonyms  = (word: string) => _synonyms(word, syn)
-export const anagrams  = (word: string) => _anagrams(word, dict)
-export const syllabify = (word: string) => _syllabify(word, syllabifier)
-export const posTag    = (text: string) => _posTag(text, dict, posTagger)
-
-// ── Re-export types for consumers ─────────────────────────────────────────
-export type { WordEntry, PosToken, MatchOptions } from './types/index.js'
-```
-
----
-
-## 5. Flexibility Matrix
-
-The table below shows how each feature handles swappable data sources and swappable algorithms. A ✅ means the variation is already handled by the existing port boundary — no feature code changes required.
-
-| Feature | Data source variation | Algorithm variation |
+| File | Class / Export | Description |
 |---|---|---|
-| **Lookup** | `IDictionaryPort` → JSON or SQLite adapter ✅ | N/A — pure retrieval |
-| **Rhyme** | `IDictionaryPort` → phonetic JSONB column in SQLite ✅ | `IRhymeStrategy` → rules or ML ✅ |
-| **Synonyms** | `ISynonymPort` → graph JSON or translation JOIN query ✅ | N/A — graph traversal is a stable algorithm |
-| **Anagrams** | `IDictionaryPort.listBySortedLetters` → precomputed column or runtime query ✅ | N/A — key sort is a pure one-liner |
-| **Syllabify** | N/A — stateless | `ISyllabifyStrategy` → rules or ML ✅ |
-| **POS Tag** | `IDictionaryPort` → dictionary-based fallback ✅ | `IPosStrategy` → rules or ML ✅ |
+| `stemmer.ts` | `Stemmer`, `StemResult` | Krovetz-based Cebuano stemmer |
+| `syllabifier.ts` | `Syllabifier`, `SyllableResult` | CV-pattern syllabification |
 
 ---
 
-## 6. Testing Strategy
+### 2. Ports (`src/ports/`)
 
-The port-injection pattern makes every feature independently testable with a plain stub object — no real database or model required.
+Interfaces that define the **contracts** between the use-case layer and infrastructure. There are two port directions:
 
-### Fixture stubs
+- **Input ports** (driving side) — interfaces that features expose to callers. Each feature may define an input port that `src/index.ts` references, keeping the public API decoupled from implementation.
+- **Output ports** (driven side) — interfaces that features call and adapters implement. Examples: `IWordRepository`, `IEntryParser`.
 
-```ts
-// tests/fixtures/mock-dictionary.ts
-import type { IDictionaryPort } from '../../src/ports/data/IDictionaryPort.js'
-import type { WordEntry } from '../../src/types/index.js'
+**Rules**
+- Ports are plain TypeScript `interface` or `type` declarations — no implementation code.
+- Port files are named after their contract: `word-repository.port.ts`, `entry-parser.port.ts`.
+- No imports from `adapters/` or any third-party package.
+- Importing from `core/` and `types/` is allowed when the interface uses domain types.
 
-const entries: WordEntry[] = [
-  {
-    word: 'bato', lemma: 'bato', pos: 'noun',
-    definitions: ['stone', 'rock'], syllables: ['ba', 'to'],
-    rhymingPart: 'ato', pronunciation: 'ba.to', variants: [],
-  },
-  {
-    word: 'gato', lemma: 'gato', pos: 'noun',
-    definitions: ['cat'], syllables: ['ga', 'to'],
-    rhymingPart: 'ato', pronunciation: 'ga.to', variants: [],
-  },
-]
+**Naming convention**
 
-export const mockDict: IDictionaryPort = {
-  getByWord: (w) => entries.find(e => e.word === w) ?? null,
-  listByRhymeKey: (k) => entries.filter(e => e.rhymingPart === k).map(e => e.word),
-  listBySortedLetters: (k) =>
-    entries.filter(e => [...e.word].sort().join('') === k).map(e => e.word),
-  has: (w) => entries.some(e => e.word === w),
-}
+```
+src/ports/
+├── word-repository.port.ts    # IWordRepository
+├── entry-parser.port.ts       # IEntryParser
+└── index.ts                   # re-exports all ports
 ```
 
-### Feature tests (no real data, no real strategy)
+---
 
-```ts
-// tests/features/rhyme.test.ts
-import { rhyme } from '../../src/features/rhyme/rhyme.js'
-import { mockDict } from '../fixtures/mock-dictionary.js'
-import type { IRhymeStrategy } from '../../src/ports/strategies/IRhymeStrategy.js'
+### 3. Features (`src/features/`)
 
-const mockRhymeStrategy: IRhymeStrategy = {
-  findRhymes: (word, dict) =>
-    dict.listByRhymeKey('ato').filter(w => w !== word),
-}
+The **use-case / application layer**. Each sub-folder encapsulates one capability of the library. A feature orchestrates `core/` algorithms and calls `ports/` (output ports) to retrieve or persist data — it never touches adapters directly.
 
-test('returns words sharing the last syllable', () => {
-  expect(rhyme('bato', mockDict, mockRhymeStrategy)).toContain('gato')
-})
+**Rules**
+- One folder per feature. The folder name is the kebab-case feature name.
+- Each feature folder must export a single entry point via its `index.ts`.
+- Features may import from `core/`, `ports/`, `types/`, and `utils/`. Never from `adapters/`.
+- Feature functions receive their dependencies via **constructor injection** or **function parameter injection** (pass the port interface, not the concrete adapter).
+- Feature functions are pure from the caller's perspective: given the same inputs and the same repository responses, they return the same output.
 
-test('excludes the query word itself', () => {
-  expect(rhyme('bato', mockDict, mockRhymeStrategy)).not.toContain('bato')
-})
+**Folder convention**
+
+```
+src/features/lookup/
+├── index.ts          # public re-export of the feature's input port & factory
+├── lookup.ts         # implementation of the use case
+└── lookup.test.ts    # co-located unit test (optional; mirrors tests/ for integration)
 ```
 
-```ts
-// tests/features/syllabify.test.ts
-import { syllabify } from '../../src/features/syllabify/syllabify.js'
-import type { ISyllabifyStrategy } from '../../src/ports/strategies/ISyllabifyStrategy.js'
+**Current features**
 
-const mockStrategy: ISyllabifyStrategy = {
-  syllabify: (w) => w === 'kalibutan' ? ['ka', 'li', 'bu', 'tan'] : [w],
-}
+| Folder | Planned capability |
+|---|---|
+| `lookup/` | Look up a Cebuano word and return its dictionary entry |
+| `synonyms/` | Find synonyms of a word from the Wolff database |
+| `rhyme/` | Find words that rhyme based on last-syllable matching |
+| `anagrams/` | Generate anagrams of a given word |
 
-test('syllabifies a known word', () => {
-  expect(syllabify('kalibutan', mockStrategy)).toEqual(['ka', 'li', 'bu', 'tan'])
-})
+---
+
+### 4. Adapters (`src/adapters/`)
+
+Concrete implementations of the **output ports**. Adapters are the only layer allowed to import third-party infrastructure packages (`better-sqlite3`, `kysely`, `fast-xml-parser`).
+
+**Rules**
+- Every adapter implements exactly one port interface and is named accordingly: `SqliteWordRepository` implements `IWordRepository`.
+- Adapters are never imported directly by features. They are wired up in `src/index.ts`.
+- Database access goes through **Kysely** — raw SQL strings are forbidden inside adapters.
+- Adapters handle infrastructure errors and translate them into domain errors defined in `core/` or `types/`.
+
+**Naming convention**
+
+```
+src/adapters/
+├── sqlite-word-repository.ts   # implements IWordRepository
+├── xml-entry-parser.ts         # implements IEntryParser
+└── index.ts                    # re-exports adapter factories
 ```
 
-### Strategy tests (pure algorithm, no ports needed)
+---
 
-```ts
-// tests/strategies/RuleBasedSyllabifier.test.ts
-import { RuleBasedSyllabifier } from '../../src/strategies/syllabify/RuleBasedSyllabifier.js'
+### 5. Types (`src/types/`)
 
-const s = new RuleBasedSyllabifier()
+Shared type definitions used across layers.
 
-test('handles CV pattern',  () => expect(s.syllabify('bata')).toEqual(['ba', 'ta']))
-test('handles CVC pattern', () => expect(s.syllabify('balay')).toEqual(['ba', 'lay']))
-```
-
-### Test layer summary
-
-| Layer | What to test | Needs real data? |
+| File | Owner | Rule |
 |---|---|---|
-| `core/` | Pure functions | No |
-| `features/` | Orchestration + port wiring | No — use stubs |
-| `strategies/` | Algorithm correctness | No — stateless |
-| `data/adapters/` | Index building, SQL queries | Yes — fixture DB / JSON |
-| `src/index.ts` | Integration smoke test | Yes — full stack |
+| `database.ts` | `kysely-codegen` | **Auto-generated. Never edit manually.** Regenerate with `pnpm db:generate`. |
+
+Additional hand-written domain types (e.g., `DictionaryEntry`, `ThesaurusResult`) should live in `src/types/` and may be imported by any layer.
 
 ---
 
-## 7. Extensibility Recipes
+### 6. Utils (`src/utils/`)
 
-### Adding a new feature (e.g. `antonyms`)
+**Pure, stateless helper functions** with no side effects and no knowledge of ports or adapters. A util function transforms data in and data out — nothing else.
 
-1. Add `IAntonymPort` to `src/ports/data/` if new data access is needed.
-2. Create `src/data/adapters/SqliteAntonymAdapter.ts` implementing it.
-3. Create `src/features/antonyms/antonyms.ts` — accepts `IAntonymPort`.
-4. Wire in `src/index.ts`:
-   ```ts
-   const ant = new SqliteAntonymAdapter('./data/cebuano.db')
-   export const antonyms = (word: string) => _antonyms(word, ant)
-   ```
-5. Add `tests/features/antonyms.test.ts` with a stub.
+**Rules**
+- No class instances; prefer plain exported functions.
+- No imports from `adapters/`, `features/`, or `ports/`.
+- Every util must have a corresponding unit test.
 
-No existing files are modified except the three import/wire lines in `index.ts`.
+**Current utilities**
 
-### Swapping to ML for syllabification
-
-1. Create `src/strategies/syllabify/MlSyllabifier.ts` implementing `ISyllabifyStrategy`.
-2. Change one line in `index.ts`:
-   ```ts
-   // before
-   const syllabifier = new RuleBasedSyllabifier()
-   // after
-   const syllabifier = new MlSyllabifier('./models/syllabify.onnx')
-   ```
-
-No feature code, no port code, no test fixtures change.
-
-### Swapping the data source (e.g. JSON → SQLite)
-
-Create `SqliteDictionaryAdapter.ts` implementing `IDictionaryPort`. Change one line in `index.ts`:
-
-```ts
-// before
-const dict = new JsonDictionaryAdapter()
-// after
-const dict = new SqliteDictionaryAdapter('./data/cebuano.db')
-```
-
-All six features are untouched.
-
-### Adding an async data source (e.g. remote API)
-
-Extend the relevant port methods to return `Promise<...>`, update the adapter to `async/await`, and update the feature function to `await` the port call. The change is contained to that feature's files, its port, and the new adapter.
+| File | Export | Description |
+|---|---|---|
+| `parseEntryXml.ts` | `parseEntryXml` | Parses Phildict WCED XML entry strings into JS objects |
 
 ---
 
-## 8. Public API Summary
+### 7. Public API (`src/index.ts`)
 
-```ts
-lookup(word: string): WordEntry | null
-rhyme(word: string): string[]
-synonyms(word: string): string[]
-anagrams(word: string): string[]
-syllabify(word: string): string[]
-posTag(text: string): PosToken[]
-```
+The **primary adapter** and the only file consumers of the library import. It wires concrete adapters to feature use cases and exposes a clean, versioned API surface.
 
-All functions are synchronous and pure from the caller's perspective. They never throw on missing data — they return `null` or empty arrays. Errors are only thrown on programmer mistakes (e.g. passing `undefined`).
+**Rules**
+- This is the **only** file that instantiates adapters and injects them into features.
+- Only export what is intended to be public. Internal types, adapters, and port interfaces are not re-exported unless required by consumers.
+- The database path is resolved relative to `import.meta.dirname` for portability.
+- No business logic lives here — it delegates entirely to features.
 
 ---
 
-## 9. Build Notes
+## Data Layer
 
-- `tsdown` bundles `src/` into `dist/index.mjs` and `dist/index.d.mts`.
-- `data/lexicon.json` is imported statically via `assert { type: 'json' }` and inlined by tsdown — no extra assets for consumers when using the JSON adapter.
-- `data/cebuano.db` is referenced by path and must be distributed alongside the package. Add it to `"files"` in `package.json`.
-- `tsconfig.json` requires `resolveJsonModule: true` for JSON imports.
-- Recommended `package.json` files field:
-  ```json
-  "files": ["dist", "data/cebuano.db"]
-  ```
+### Database
+
+The Wolff SQLite database (`data/database/wolff.sqlite`) is the primary data source. It is not committed to the repository; it is generated locally via `pnpm db:import` (see scripts).
+
+**Schema (Kysely-typed)**
+
+| Table | Key columns | Purpose |
+|---|---|---|
+| `wced_entry` | `_id`, `entry` (XML), `head`, `page` | Full dictionary entry stored as raw XML |
+| `wced_head` | `_id`, `entryid`, `head`, `normalized_head`, `pos`, `type` | Indexed headwords with part-of-speech |
+| `wced_translation` | `_id`, `entryid`, `translation` | English translations per entry |
+| `android_metadata` | `locale` | Legacy metadata from Phildict Android app |
+
+### Migrations
+
+Schema changes are managed by **Kysely Migrator**. Migration files live in `data/database/migrations/`.
+
+- Filenames must follow the pattern `YYYY-MM-DD-<description>.ts`, e.g. `2025-01-15-add-normalized-head-index.ts`.
+- Migrations are run with `pnpm db:migrate`.
+- Never modify an existing migration file once it has been committed. Create a new migration instead.
+
+### Scripts
+
+| Script | Command | Description |
+|---|---|---|
+| `scripts/import-phildict-wolff-sql.ts` | _(run once manually)_ | Drops and re-creates `wolff.sqlite` from raw Phildict SQL dumps |
+| `scripts/migrate.ts` | `pnpm db:migrate` | Runs Kysely migrations to latest |
+
+Scripts are one-off tooling and must not be imported by library source code.
+
+---
+
+## Dependency Rules (Enforced Convention)
+
+The table below defines which layers may import from which. Violating this breaks the hexagonal contract.
+
+| From ↓ \ To → | `core` | `ports` | `features` | `adapters` | `types` | `utils` |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| `core` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| `ports` | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ |
+| `features` | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| `adapters` | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| `types` | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| `utils` | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| `index.ts` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+---
+
+## Naming Conventions
+
+### Files
+
+| Context | Convention | Example |
+|---|---|---|
+| Core class | `kebab-case.ts` | `stemmer.ts`, `syllabifier.ts` |
+| Port interface | `kebab-case.port.ts` | `word-repository.port.ts` |
+| Adapter class | `kebab-case.ts` | `sqlite-word-repository.ts` |
+| Feature use case | `kebab-case.ts` | `lookup.ts`, `find-synonyms.ts` |
+| Utility function | `camelCase.ts` | `parseEntryXml.ts` |
+| Test file | same name + `.test.ts` | `stemmer.test.ts` |
+
+### TypeScript Identifiers
+
+| Kind | Convention | Example |
+|---|---|---|
+| Interface | `PascalCase` prefixed with `I` | `IWordRepository` |
+| Class | `PascalCase` | `Stemmer`, `SqliteWordRepository` |
+| Type alias | `PascalCase` | `StemResult`, `DictionaryEntry` |
+| Function | `camelCase` | `parseEntryXml`, `lookup` |
+| Enum | `PascalCase` (values `UPPER_SNAKE`) | `PartOfSpeech.NOUN` |
+| Constant | `UPPER_SNAKE_CASE` | `PREFIXES`, `SUFFIXES` |
+
+### Exports
+
+- Prefer **named exports** everywhere. Default exports are only acceptable for `tsdown.config.ts` and configuration files.
+- Every `src/` sub-folder exposes a barrel `index.ts` that re-exports its public surface.
+
+---
+
+## Testing
+
+| Type | Location | Runner | Scope |
+|---|---|---|---|
+| Unit | Co-located `*.test.ts` or `tests/` | Vitest | Core, utils, features (mocked ports) |
+| Integration | `tests/` | Vitest | Adapter + real SQLite database |
+
+**Rules**
+- Feature tests must mock output ports — they must not touch the real database.
+- Adapter (integration) tests may use a real SQLite in-memory database or a test fixture copy of `wolff.sqlite`.
+- Core tests are pure input/output with no mocking.
+- Tests are run with `pnpm test`.
+
+---
+
+## Build & Tooling
+
+| Tool | Purpose | Config file |
+|---|---|---|
+| `tsdown` | Bundles library to `dist/index.mjs` + `.d.ts` | `tsdown.config.ts` |
+| `typescript` | Type checking | `tsconfig.json` |
+| `vitest` | Test runner | `package.json` (vitest field) |
+| `bumpp` | Version bumping + git tagging | CLI |
+| `kysely-codegen` | Generates `src/types/database.ts` from live schema | `pnpm db:generate` |
+
+**TypeScript strictness:** `strict: true`, `noUnusedLocals: true`, `verbatimModuleSyntax: true`. These are non-negotiable.
+
+---
+
+## Adding a New Feature — Checklist
+
+1. Create `src/features/<feature-name>/` with `<feature-name>.ts` and `index.ts`.
+2. Define the feature's output port interface in `src/ports/<dependency>.port.ts` if new data access is required.
+3. Implement the port in `src/adapters/<impl>.ts`.
+4. Wire the adapter into the feature in `src/index.ts`.
+5. Write unit tests for the use case with a mocked port.
+6. Write an integration test in `tests/` if the adapter is non-trivial.
+7. Export the feature's public API from `src/index.ts`.
+8. Update this document if new layers or conventions are introduced.
