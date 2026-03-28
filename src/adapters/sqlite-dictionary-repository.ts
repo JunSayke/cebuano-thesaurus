@@ -1,8 +1,9 @@
-import type { Kysely } from 'kysely';
+import { Kysely, sql } from 'kysely';
 import type { DB } from '../types/database';
 import type { IDictionaryRepository } from '../ports/dictionary-repository.port';
 import { parseEntryXml } from '../utils/parseEntryXml';
 import type { EntrySummary, ThesaurusEntry } from '../types/dictionary';
+import type { RhymeSearchParams, RhymeCandidate } from '../types/rhyme';
 
 export class SqliteDictionaryRepository implements IDictionaryRepository {
   constructor(private readonly db: Kysely<DB>) {}
@@ -47,5 +48,71 @@ export class SqliteDictionaryRepository implements IDictionaryRepository {
       .executeTakeFirst();
 
     return row?.entry ? parseEntryXml(row.entry) : null;
+  }
+
+  async findRhymes(params: RhymeSearchParams): Promise<RhymeCandidate[]> {
+    const { 
+      targetNucleus, 
+      targetCoda, 
+      targetSyllableCount, 
+      allophoneNuclei, 
+      similarCodas, 
+      limit = 25, 
+      offset = 0,
+      maxSyllableOffset
+    } = params;
+
+    let query = this.db
+      .selectFrom('wced_head')
+      .select([
+        '_id as entryId',
+        'head as headword',
+        'normalized_head as normalizedHead',
+        'pos',
+        sql<number>`json_extract(metadata, '$.syllableCount')`.as('syllableCount'),
+        // Return the raw rhyme object for display/filtering
+        sql<string>`json_extract(metadata, '$.rhyme')`.as('rhymeJson'),
+        sql<number>`(
+          CASE 
+            WHEN json_extract(metadata, '$.rhyme.nucleus') = ${targetNucleus} 
+             AND json_extract(metadata, '$.rhyme.coda') = ${targetCoda} 
+            THEN 100
+            WHEN json_extract(metadata, '$.rhyme.nucleus') IN (${sql.join(allophoneNuclei)}) 
+             AND json_extract(metadata, '$.rhyme.coda') = ${targetCoda} 
+            THEN 75
+            WHEN json_extract(metadata, '$.rhyme.nucleus') = ${targetNucleus} 
+             AND json_extract(metadata, '$.rhyme.coda') IN (${sql.join(similarCodas)}) 
+            THEN 60
+            ELSE 40
+          END
+          + (CASE WHEN json_extract(metadata, '$.syllableCount') = ${targetSyllableCount} THEN 5 ELSE 0 END)
+        )`.as('score')
+      ])
+      .where(sql`json_extract(metadata, '$.rhyme.nucleus')`, 'in', allophoneNuclei);
+
+    if (maxSyllableOffset !== undefined) {
+      const min = targetSyllableCount - maxSyllableOffset;
+      const max = targetSyllableCount + maxSyllableOffset;
+      query = query
+        .where(sql`json_extract(metadata, '$.syllableCount')`, '>=', min)
+        .where(sql`json_extract(metadata, '$.syllableCount')`, '<=', max);
+    }
+
+    const rows = await query
+      .orderBy('score', 'desc')
+      .limit(limit)
+      .offset(offset)
+      .execute();
+
+    return rows.map(r => ({
+      entryId: r.entryId as number,
+      headword: r.headword as string,
+      normalizedHead: r.normalizedHead as string,
+      pos: r.pos as string,
+      score: r.score as number,
+      syllableCount: r.syllableCount as number,
+      rhyme: JSON.parse(r.rhymeJson as string),
+      rhymeType: r.score >= 100 ? 'perfect' : r.score >= 75 ? 'family' : r.score >= 60 ? 'additive' : 'assonance'
+    })) as RhymeCandidate[];
   }
 }

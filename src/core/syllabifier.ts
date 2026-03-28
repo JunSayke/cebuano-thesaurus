@@ -1,8 +1,13 @@
 /**
  * Cebuano Syllabifier
- * Breaks down Cebuano words into syllables
- * Based on CV(C) phonological patterns
+ * Breaks down Cebuano words into syllables based on CV(C) phonological patterns.
+ *
  * Ported from: https://github.com/eemberda/Cebuano-Syllable-Decoder
+ *
+ * References:
+ *   - M. V. R. Bunye and E. P. Yap, Cebuano Grammar Notes.
+ *     University of Hawai'i Press, 1971.
+ *   - Computational Linguistics @ Illinois. Syllable Script in Python, 2017.
  */
 
 export interface SyllableResult {
@@ -12,55 +17,84 @@ export interface SyllableResult {
 }
 
 export class Syllabifier {
-  private readonly vowels = ['a', 'e', 'i', 'o', 'u'];
-  private readonly consonants = ['p', 't', 'k', 'b', 'd', 'g', 'm', 'n', 'ng', 's', 'h', 'l', 'r', 'w', 'y'];
-  private readonly consonantClusters = [
-    'pw', 'py', 'pr', 'pl', 'tw', 'ty', 'tr', 'ts', 'kw', 'ky', 'kr', 'kl',
-    'bw', 'by', 'br', 'bl', 'dw', 'dy', 'dr', 'gw', 'gr', 'mw', 'my', 'nw', 'ny', 'sw', 'sy', 'hw'
-  ];
+  // -------------------------------------------------------------------------
+  // Phoneme inventory
+  // -------------------------------------------------------------------------
+
+  private readonly vowelSet = new Set(['a', 'e', 'i', 'o', 'u']);
+
+  private readonly consonantSet = new Set([
+    'p', 't', 'k', 'b', 'd', 'g', 'm', 'n', 'ng',
+    's', 'h', 'l', 'r', 'w', 'y',
+  ]);
 
   /**
-   * Get CV sequence for a word
-   * Converts word into pattern of Consonants (C) and Vowels (V)
+   * Set used for O(1) lookup of two-consonant onset clusters.
+   *
+   * FIX (Bug 2): The original code rebuilt an object via Object.fromEntries()
+   * on every character iteration and used the `in` operator to check membership.
+   * A Set is allocated once and gives O(1) has() checks.
    */
-  private getCVSequence(word: string): string {
-    const lowerWord = word.toLowerCase();
-    let prevCons: string | null = null;
+  private readonly clusterSet = new Set([
+    'pw', 'py', 'pr', 'pl',
+    'tw', 'ty', 'tr', 'ts',
+    'kw', 'ky', 'kr', 'kl',
+    'bw', 'by', 'br', 'bl',
+    'dw', 'dy', 'dr',
+    'gw', 'gr',
+    'mw', 'my',
+    'nw', 'ny',
+    'sw', 'sy',
+    'hw',
+  ]);
+
+  // -------------------------------------------------------------------------
+  // CV sequence builder
+  // -------------------------------------------------------------------------
+
+  /**
+   * Converts a single (non-hyphenated) word segment into a CV sequence string.
+   *
+   * Rules applied in priority order for each character:
+   *  1. Skip non-Cebuano characters.
+   *  2. 'n' + 'g' → collapse into the 'ng' digraph (one C slot).
+   *  3. 'ng' + consonant → emit C for the new consonant; 'ng' already owns its C.
+   *  4. Any pending consonant + vowel → emit V, clear pending.
+   *  5. Two-consonant cluster (e.g. 'pr', 'kw') → emit C for the cluster unit.
+   *  6. Single consonant → emit C, mark as pending.
+   *  7. Lone vowel (no pending consonant) → emit V.
+   */
+  private getCVSequence(segment: string): string {
     let cvSeq = '';
+    let prevCons: string | null = null;
 
-    for (const char of lowerWord) {
-      // Skip invalid characters
-      if (!this.vowels.includes(char) && !this.consonants.includes(char)) {
+    for (const char of segment) {
+      const isVowel = this.vowelSet.has(char);
+      const isCons  = this.consonantSet.has(char);  // single chars only; 'ng' never matches here
+
+      if (!isVowel && !isCons) {
+        // Ignore punctuation, digits, spaces, etc.
         continue;
-      }
-
-      // Handle 'ng' digraph
-      if (prevCons === 'n' && char === 'g') {
+      } else if (prevCons === 'n' && char === 'g') {
+        // Merge: absorb 'g' into the pending 'n' → 'ng' digraph.
+        // The C slot was already emitted when 'n' was first processed.
         prevCons = 'ng';
-        continue;
-      } else if (prevCons === 'ng' && this.consonants.includes(char)) {
-        prevCons = char;
+      } else if (prevCons === 'ng' && isCons) {
+        // 'ng' is fully resolved; the next consonant starts a new pending slot.
         cvSeq += 'C';
-      }
-      // Consonant followed by vowel
-      else if (prevCons && this.vowels.includes(char)) {
+        prevCons = char;
+      } else if (prevCons !== null && isVowel) {
+        // Pending consonant (or digraph) + vowel → close with V.
         cvSeq += 'V';
         prevCons = null;
-      }
-      // Consonant cluster
-      else if (prevCons && prevCons + char in Object.fromEntries(
-        this.consonantClusters.map((c) => [c, true])
-      )) {
+      } else if (prevCons !== null && this.clusterSet.has(prevCons + char)) {
+        // Two-consonant onset cluster treated as a single C unit.
         cvSeq += 'C';
         prevCons = null;
-      }
-      // Single consonant
-      else if (this.consonants.includes(char)) {
+      } else if (isCons) {
         cvSeq += 'C';
         prevCons = char;
-      }
-      // Vowel
-      else if (this.vowels.includes(char)) {
+      } else if (isVowel) {
         cvSeq += 'V';
         prevCons = null;
       }
@@ -69,159 +103,180 @@ export class Syllabifier {
     return cvSeq;
   }
 
+  // -------------------------------------------------------------------------
+  // Syllabification rules
+  // -------------------------------------------------------------------------
+
   /**
-   * Extract syllables from a Cebuano word
-   * Uses CV(C) pattern matching rules to determine syllable boundaries
+   * Inserts '-' syllable boundary markers into a raw CV sequence string.
+   *
+   * Rules are applied in priority order; the pass restarts after every
+   * substitution — mirroring the Python `while X in s: s = s.replace(X, Y)`.
+   */
+  private applySyllableRules(seq: string): string {
+    // More specific / longer patterns must precede shorter overlapping ones.
+    const rules: ReadonlyArray<[RegExp, string]> = [
+      [/CVCCV/,  'CVC-CV'],
+      [/VCV/,    'V-CV'],
+      [/VV/,     'V-V'],
+      [/CCVCCV/, 'CCVC-CV'],
+      [/CCVCV/,  'CCV-CV'],
+      [/VCC/,    'VC-C'],
+      [/CVCV/,   'CV-CV'],
+      [/VVC/,    'V-VC'],
+    ];
+
+    let s = seq;
+    let changed = true;
+
+    while (changed) {
+      changed = false;
+      for (const [pattern, replacement] of rules) {
+        const next = s.replace(pattern, replacement);
+        if (next !== s) {
+          s = next;
+          changed = true;
+          break; // Restart the pass — same semantics as nested while-loops.
+        }
+      }
+    }
+
+    return s;
+  }
+
+  // -------------------------------------------------------------------------
+  // Public API
+  // -------------------------------------------------------------------------
+
+  /**
+   * Accepts a Cebuano word (optionally hyphenated for affixed forms) and
+   * returns the syllable list together with CV pattern strings.
+   *
+   * @example
+   * getSyllables("buang")
+   * // { word: "buang", syllables: ["bu","ang"], patterns: ["CV","VC"] }
+   *
+   * @example
+   * getSyllables("tinabangay")
+   * // { syllables: ["ti","na","ba","ngay"], patterns: ["CV","CV","CV","CVC"] }
+   *
+   * @example
+   * getSyllables("mag-tinabangay")
+   * // { syllables: ["mag","ti","na","ba","ngay"], patterns: ["CVC","CV","CV","CV","CVC"] }
+   *
+   * @example
+   * getSyllables("mangaon")
+   * // { syllables: ["ma","nga","on"], patterns: ["CV","CV","VC"] }
    */
   getSyllables(word: string): SyllableResult {
     const lowerWord = word.toLowerCase().trim();
     const syllables: string[] = [];
     const patterns: string[] = [];
 
-    const words = lowerWord.split('-').filter(Boolean);
+    // Hyphenated words (mag-__, pag-__, etc.) are segmented independently.
+    const parts = lowerWord.split('-').filter(Boolean);
 
-    for (const w of words) {
-      let sylSeq = this.getCVSequence(w);
+    for (const part of parts) {
+      const rawSeq    = this.getCVSequence(part);
+      const segmented = this.applySyllableRules(rawSeq);
+      const sylSeqArr = segmented.split('-');
 
-      // Apply syllable boundary rules (order matters)
-      while (sylSeq.includes('CVCCV')) {
-        sylSeq = sylSeq.replace('CVCCV', 'CVC-CV');
-      }
-      while (sylSeq.includes('VCV')) {
-        sylSeq = sylSeq.replace('VCV', 'V-CV');
-      }
-      while (sylSeq.includes('VV')) {
-        sylSeq = sylSeq.replace('VV', 'V-V');
-      }
-      while (sylSeq.includes('CCVCCV')) {
-        sylSeq = sylSeq.replace('CCVCCV', 'CCVC-CV');
-      }
-      while (sylSeq.includes('CCVCV')) {
-        sylSeq = sylSeq.replace('CCVCV', 'CCV-CV');
-      }
-      while (sylSeq.includes('VCC')) {
-        sylSeq = sylSeq.replace('VCC', 'VC-C');
-      }
-      while (sylSeq.includes('CVCV')) {
-        sylSeq = sylSeq.replace('CVCV', 'CV-CV');
-      }
-      while (sylSeq.includes('VVC')) {
-        sylSeq = sylSeq.replace('VVC', 'V-VC');
-      }
+      patterns.push(...sylSeqArr);
 
-      const sylSeqArr = sylSeq.split('-');
-
-      // Map patterns and extract actual syllables
-      for (const cv of sylSeqArr) {
-        patterns.push(cv);
-      }
-
-      // Extract syllables from word based on CV patterns
+      /**
+       * Map each CV token back to the actual characters in `part`.
+       *
+       * FIX (Bug 1 — the "buang" bug):
+       *
+       * The original code used:
+       *   for (let j = 0; j < cv.length - 1; j++) { ... check w[charIndex+j] for 'ng' }
+       *
+       * For a "VC" slot (length = 2) the loop runs j = 0..0 only, so it checks
+       * position charIndex+0 for 'n' and charIndex+1 for 'g'. But in "buang",
+       * the syllable "ang" has 'n' at position 3 and 'g' at position 4 — that
+       * is j=1, which the loop never reaches. Result: "an" instead of "ang".
+       *
+       * The Python source does:
+       *   if "ng" in w[i : i + chars + 1]:
+       *       syllables.append(w[i : i + chars + 1])
+       *
+       * Equivalent fix: check whether 'ng' appears anywhere in the slice
+       * [charIndex .. charIndex + cv.length + 1] (the syllable characters plus
+       * one lookahead for the second byte of the digraph).
+       */
       let charIndex = 0;
       for (const cv of sylSeqArr) {
-        let syllableLength = cv.length;
+        const lookahead      = part.substring(charIndex, charIndex + cv.length + 1);
+        const syllableLength = lookahead.includes('ng') ? cv.length + 1 : cv.length;
 
-        // Check if there's an 'ng' digraph anywhere in this pattern
-        // by looking ahead for 'ng' within the syllable length
-        for (let j = 0; j < cv.length - 1; j++) {
-          const checkIndex = charIndex + j;
-          if (checkIndex + 1 < w.length && w[checkIndex] === 'n' && w[checkIndex + 1] === 'g') {
-            // 'ng' found - increase syllable length by 1
-            syllableLength += 1;
-            break;
-          }
-        }
-
-        const syllable = w.substring(charIndex, charIndex + syllableLength);
-        syllables.push(syllable);
+        syllables.push(part.substring(charIndex, charIndex + syllableLength));
         charIndex += syllableLength;
       }
     }
 
-    return {
-      word: lowerWord,
-      syllables,
-      patterns,
-    };
+    return { word: lowerWord, syllables, patterns };
   }
 
+  // -------------------------------------------------------------------------
+  // Convenience helpers
+  // -------------------------------------------------------------------------
+
   /**
-   * Segment multi-word input and syllabify each token separately
+   * Syllabify each whitespace-separated token in a string.
    */
   segmentText(text: string): SyllableResult[] {
     return text
-      .split(/[\s]+/)
+      .split(/\s+/)
       .filter(Boolean)
       .map((token) => this.getSyllables(token));
   }
 
-  /**
-   * Get last syllable of a word
-   */
+  /** Returns the last syllable of a word. */
   getLastSyllable(word: string): string {
-    const result = this.getSyllables(word);
-    return result.syllables[result.syllables.length - 1] || '';
+    const { syllables } = this.getSyllables(word);
+    return syllables[syllables.length - 1] ?? '';
   }
 
   /**
-   * Split syllable into onset (initial consonant), nucleus (vowel), and coda (final consonant(s))
+   * Splits a syllable into onset (initial consonant(s)), nucleus (vowel(s)),
+   * and coda (trailing consonant(s)).
    */
-  splitSyllable(syllable: string): {
-    onset: string;
-    nucleus: string;
-    coda: string;
-  } {
-    const syllableLower = syllable.toLowerCase();
-    let onset = '';
-    let nucleus = '';
-    let coda = '';
-
+  splitSyllable(syllable: string): { onset: string; nucleus: string; coda: string } {
+    const s = syllable.toLowerCase();
     let vowelStart = -1;
-    let vowelEnd = -1;
+    let vowelEnd   = -1;
 
-    // Find vowel position
-    for (let i = 0; i < syllableLower.length; i++) {
-      if (this.vowels.includes(syllableLower[i])) {
-        if (vowelStart === -1) {
-          vowelStart = i;
-        }
+    for (let i = 0; i < s.length; i++) {
+      if (this.vowelSet.has(s[i])) {
+        if (vowelStart === -1) vowelStart = i;
         vowelEnd = i;
       }
     }
 
     if (vowelStart === -1) {
-      // No vowel found, treat whole as coda
-      coda = syllableLower;
-    } else {
-      onset = syllableLower.substring(0, vowelStart);
-      nucleus = syllableLower.substring(vowelStart, vowelEnd + 1);
-      coda = syllableLower.substring(vowelEnd + 1);
+      return { onset: '', nucleus: '', coda: s }; // No vowel — entire syllable is coda.
     }
 
-    return { onset, nucleus, coda };
+    return {
+      onset:   s.substring(0, vowelStart),
+      nucleus: s.substring(vowelStart, vowelEnd + 1),
+      coda:    s.substring(vowelEnd + 1),
+    };
   }
 
   /**
-   * Detect syllable pattern (CV, CVC, V, VC, etc.)
+   * Returns the abstract pattern of a syllable (e.g. "CV", "CVC", "V", "VC").
+   * Note: onset consonant clusters (e.g. "ng", "pr") are collapsed to a single C.
    */
   getSyllablePattern(syllable: string): string {
     const { onset, nucleus, coda } = this.splitSyllable(syllable);
-
-    let pattern = '';
-    if (onset) pattern += 'C';
-    pattern += 'V';
-    if (coda) pattern += 'C';
-
-    return pattern;
+    return (onset ? 'C' : '') + (nucleus ? 'V' : '') + (coda ? 'C' : '');
   }
 
   /**
-   * Validate if a syllable follows valid Cebuano patterns
+   * Returns true if the syllable contains at least one vowel (minimum validity).
    */
   isValidSyllable(syllable: string): boolean {
-    const pattern = this.getSyllablePattern(syllable);
-    // Valid patterns: V, CV, VC, CVC, CCV, VCC, CCVC, CVCC (rare), etc.
-    // Minimum requirement: must have a vowel
-    return pattern.includes('V');
+    return [...syllable.toLowerCase()].some((c) => this.vowelSet.has(c));
   }
 }
