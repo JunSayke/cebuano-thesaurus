@@ -15,7 +15,7 @@ export const cleanInlineFormatting = (xml: string) => xml
 
 const parseTrans = (t: any): string[] => {
   const txt = (typeof t === 'string' ? t : t?.['#text'] || toArr(t?.tr).join(', ') || '').trim();
-  return txt ? [txt.startsWith('=') ? txt.replace(/\s+/g, ' ') : txt.replace(/\.$/, '$1')] : [];
+  return txt ? [txt.replace(/\s+/g, ' ')] : [];
 };
 
 const parseEgs = (egs: any): Example[] => toArr(egs).map((e: any) => ({
