@@ -2,6 +2,9 @@
   "name": "@junsayke/cebuano-thesaurus",
   "type": "module",
   "version": "1.0.0",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "description": "A thesaurus for the Cebuano language, providing synonyms and related words.",
   "author": "Antonio Ubaldo <antonio.junjr@gmail.com>",
   "license": "MIT",
@@ -18,7 +21,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "data/database/wolff.sqlite"
   ],
   "scripts": {
     "build": "tsdown",
