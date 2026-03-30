@@ -19,13 +19,12 @@ const db = new Kysely<DB>({
 
 const repository = new SqliteDictionaryRepository(db);
 const rhymeFeature = new RhymeFeature(repository);
-const anagramFeature = createAnagramFeature(repository);
 
 // Feature Exports
 export const lookup = createLookupFeature(repository);
 export const fuzzySearch = createFuzzySearchFeature(repository);
 export const getSynonyms = createSynonymFeature(repository);
-export const getAnagrams = (word: string, limit?: number) => anagramFeature(word, limit);
+export const getAnagrams = createAnagramFeature(repository);
 export const getRhymes = (word: string, options?: RhymeOptions) => rhymeFeature.getRhymes(word, options);
 
 // Export core modules for direct consumer use
