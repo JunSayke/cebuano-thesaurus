@@ -3,6 +3,7 @@ export interface EntrySummary {
   headword: string;
   normalizedHead: string;
   pos?: string;
+  translations: string[];   // flat list of English glosses across all senses
 }
 
 export interface BaseDictionaryEntry {

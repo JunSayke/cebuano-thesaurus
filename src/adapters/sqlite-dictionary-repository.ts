@@ -13,7 +13,7 @@ export class SqliteDictionaryRepository implements IDictionaryRepository {
 
     const rows = await this.db
       .selectFrom('wced_head')
-      .select(['entryid', 'head', 'normalized_head', 'pos'])
+      .select(['entryid', 'head', 'normalized_head', 'pos', sql<string>`(SELECT json_group_array(translation) FROM wced_translation WHERE entryid = wced_head.entryid)`.as('translations')])
       .where('type', '=', 'm')
       // Find any matching entry (main or sub) and use its entryid
       .where('entryid', 'in', (eb) => eb
@@ -36,16 +36,23 @@ export class SqliteDictionaryRepository implements IDictionaryRepository {
         headword: r.head as string,
         normalizedHead: r.normalized_head as string,
         pos: r.pos ?? undefined,
+        translations: JSON.parse(r.translations || '[]').filter(Boolean)
       }));
   }
 
-  async findEntry(word: string): Promise<ThesaurusEntry | null> {
-    const row = await this.db
+  async findEntry(query: string | number): Promise<ThesaurusEntry | null> {
+    let dbQuery = this.db
       .selectFrom('wced_head')
       .innerJoin('wced_entry', 'wced_head.entryid', 'wced_entry._id')
-      .select('wced_entry.entry')
-      .where('wced_head.normalized_head', '=', word.toLowerCase())
-      .executeTakeFirst();
+      .select('wced_entry.entry');
+
+    if (typeof query === 'number') {
+      dbQuery = dbQuery.where('wced_head.entryid', '=', query);
+    } else {
+      dbQuery = dbQuery.where('wced_head.normalized_head', '=', query.toLowerCase());
+    }
+
+    const row = await dbQuery.executeTakeFirst();
 
     return row?.entry ? parseEntryXml(row.entry) : null;
   }

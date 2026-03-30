@@ -3,7 +3,7 @@ import { fuzzySearch } from '../src/index';
 async function main() {
   console.log("Initializing Cebuano Thesaurus...\n");
 
-  const wordToTest = "kinabuang";
+  const wordToTest = "baga";
   console.log(`Searching up: "${wordToTest}"`);
 
   const result = await fuzzySearch(wordToTest);
