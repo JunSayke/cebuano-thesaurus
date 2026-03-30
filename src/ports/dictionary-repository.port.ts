@@ -18,4 +18,9 @@ export interface IDictionaryRepository {
    * Performs a comprehensive rhyming search using database-side scoring.
    */
   findRhymes(params: RhymeSearchParams): Promise<RhymeCandidate[]>;
+
+  /**
+   * Find anagrams of the given base word from the dictionary (excluding the word itself).
+   */
+  findAnagrams(word: string, limit?: number): Promise<EntrySummary[]>;
 }

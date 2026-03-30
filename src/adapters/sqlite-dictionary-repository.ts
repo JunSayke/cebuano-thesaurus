@@ -184,4 +184,40 @@ export class SqliteDictionaryRepository implements IDictionaryRepository {
       rhymeType: r.score >= 100 ? 'perfect' : r.score >= 75 ? 'family' : r.score >= 60 ? 'additive' : 'assonance'
     })) as RhymeCandidate[];
   }
+
+  async findAnagrams(word: string, limit = 25): Promise<EntrySummary[]> {
+    const normalizedInput = word.toLowerCase().trim();
+    const key = normalizedInput.replace(/[^a-z0-9]/gi, '');
+    if (!key) {
+      return [];
+    }
+
+    const sortedKey = key.split('').sort().join('');
+
+    const rows = await this.db
+      .selectFrom('wced_head as h')
+      .innerJoin('wced_translation as t', 'h.entryid', 't.entryid')
+      .select([
+        'h.entryid',
+        'h.head',
+        'h.normalized_head',
+        'h.pos',
+        sql<string>`json_group_array(t.translation)`.as('translations')
+      ])
+      .where('h.type', '=', 'm')
+      .where(sql`json_extract(h.metadata, '$.sortedChars')`, '=', sortedKey)
+      .where('h.normalized_head', '!=', normalizedInput)
+      .groupBy('h.entryid')
+      .limit(limit)
+      .execute();
+
+    return rows
+      .map(r => ({
+        entryId: r.entryid as number,
+        headword: r.head as string,
+        normalizedHead: r.normalized_head as string,
+        pos: r.pos ?? undefined,
+        translations: JSON.parse(r.translations || '[]').filter(Boolean)
+      }));
+  }
 }
