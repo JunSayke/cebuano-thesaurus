@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { lookup } from '../src/index';
+import { lookup, getSynonyms } from '../src/index';
 
 test('lookup feature integration', async () => {
   const result = await lookup('adlaw');
@@ -8,4 +8,13 @@ test('lookup feature integration', async () => {
   if (result) {
     expect(typeof result).toBe('object');
   }
+});
+
+test('synonym lookup via shared translation', async () => {
+  const synonyms = await getSynonyms('adlaw');
+  expect(Array.isArray(synonyms)).toBe(true);
+  expect(synonyms.length).toBeGreaterThan(0);
+  expect(synonyms).toEqual(expect.arrayContaining([
+    expect.objectContaining({ headword: expect.any(String) })
+  ]));
 });

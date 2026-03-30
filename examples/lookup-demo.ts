@@ -3,7 +3,7 @@ import { lookup } from '../src/index';
 async function main() {
   console.log("Initializing Cebuano Thesaurus...\n");
 
-  const wordToTest = "buang";
+  const wordToTest = "baga";
   console.log(`Looking up: "${wordToTest}"`);
 
   const result = await lookup(wordToTest);

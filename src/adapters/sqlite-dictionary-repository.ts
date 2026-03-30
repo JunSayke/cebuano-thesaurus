@@ -57,6 +57,68 @@ export class SqliteDictionaryRepository implements IDictionaryRepository {
     return row?.entry ? parseEntryXml(row.entry) : null;
   }
 
+  async findTranslations(query: string | number): Promise<string[]> {
+    let dbQuery = this.db
+      .selectFrom('wced_head')
+      .select('entryid');
+
+    if (typeof query === 'number') {
+      dbQuery = dbQuery.where('entryid', '=', query);
+    } else {
+      dbQuery = dbQuery.where('normalized_head', '=', query.toLowerCase());
+    }
+
+    const row = await dbQuery.executeTakeFirst();
+    if (!row?.entryid) {
+      return [];
+    }
+
+    const translations = await this.db
+      .selectFrom('wced_translation')
+      .select('translation')
+      .where('entryid', '=', row.entryid)
+      .execute();
+
+    return translations
+      .map(t => t.translation)
+      .filter((t): t is string => !!t)
+      .map(t => t.trim());
+  }
+
+  async findEntriesByTranslations(translations: string[], limit = 50): Promise<EntrySummary[]> {
+    const normalizedTranslations = translations
+      .map(t => t.toLowerCase().trim())
+      .filter(Boolean);
+
+    if (normalizedTranslations.length === 0) {
+      return [];
+    }
+
+    const rows = await this.db
+      .selectFrom('wced_head as h')
+      .innerJoin('wced_translation as t', 'h.entryid', 't.entryid')
+      .select([
+        'h.entryid',
+        'h.head',
+        'h.normalized_head',
+        'h.pos',
+        sql<string>`(SELECT json_group_array(translation) FROM wced_translation WHERE entryid = h.entryid)`.as('translations')
+      ])
+      .where('h.type', '=', 'm')
+      .where(sql`lower(t.translation)`, 'in', normalizedTranslations)
+      .groupBy('h.entryid')
+      .limit(limit)
+      .execute();
+
+    return rows.map(r => ({
+      entryId: r.entryid as number,
+      headword: r.head as string,
+      normalizedHead: r.normalized_head as string,
+      pos: r.pos ?? undefined,
+      translations: JSON.parse(r.translations || '[]').filter(Boolean)
+    }));
+  }
+
   async findRhymes(params: RhymeSearchParams): Promise<RhymeCandidate[]> {
     const { 
       targetNucleus, 
