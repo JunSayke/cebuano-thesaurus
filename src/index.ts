@@ -13,7 +13,10 @@ const dbPath = `${import.meta.dirname}/../data/database/wolff.sqlite`;
 
 const db = new Kysely<DB>({
   dialect: new SqliteDialect({ 
-    database: new Sqlite(dbPath, { readonly: true, fileMustExist: true }) 
+    database: new Sqlite(dbPath, { 
+      readonly: true,
+      fileMustExist: true
+    }) 
   })
 });
 

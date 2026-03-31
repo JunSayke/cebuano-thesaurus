@@ -24,3 +24,10 @@ sql.exec(read('structure-sqlite'));
 ['entry', 'head'].forEach(t => 
   console.log(t, (sql.prepare(`SELECT COUNT(*) c FROM wced_${t}`).get() as any).c)
 );
+
+// 4. Force SQLite out of WAL mode before saving the final file
+console.log('Converting database out of WAL mode for read-only distribution...');
+sql.pragma('journal_mode = DELETE');
+
+sql.close(); // Ensure everything is flushed to the single .sqlite file
+console.log('Done.');
